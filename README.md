@@ -21,6 +21,14 @@ Safelock
 GIMP Startup
 VirtualBox
 VirtualBoxVM
+Docklike Taskbar
+Web Inspector
+Untitled window
+Goverlay
+None
+Special Offers
+Sign in to Steam
+Shutdown
 ```
 
 ### Installation:
