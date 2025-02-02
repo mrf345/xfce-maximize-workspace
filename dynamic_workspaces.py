@@ -48,7 +48,6 @@ class DynamicWorkspaces:
         Notify.init("Workspace Switch Notifier")
 
         if not os.path.exists(MAXIMIZE_BLACKLIST_PATH):
-            print(MAXIMIZE_BLACKLIST_PATH)
             open(MAXIMIZE_BLACKLIST_PATH, 'x').close()
 
     @property
@@ -271,6 +270,10 @@ class DynamicWorkspaces:
 
         workspaces = self.screen.get_workspaces()
         workspace = in_window.get_workspace()
+
+        if workspace is None:
+            return
+
         workspace_pos = workspace.get_number()
         windows = [w for w in self.get_clean_windows() if w != in_window]
         workspace_empty = self.is_workspace_empty(workspace, windows)
