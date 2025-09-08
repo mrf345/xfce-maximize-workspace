@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import time
 import gi
 
 gi.require_version("Wnck", "3.0")
@@ -13,6 +14,8 @@ import sys
 
 INIT_WS_COUNT = 2
 MAXIMIZE_BLACKLIST_PATH = os.path.expanduser("~/.xfce_max_blacklist")
+MAXIMIZE_ROLE_BLACKLIST_PATH = os.path.expanduser("~/.xfce_role_blacklist")
+MAXIMIZE_PAUSE_PATH = os.path.expanduser("~/.xfce_max_pause")
 
 class DynamicWorkspaces:
     # Self initialization
@@ -36,19 +39,25 @@ class DynamicWorkspaces:
         }
         self.window_classrole_blacklist = {
             "tilix.quake",
+            None,
         }
+        self.role_black_listed = dict()
         self.last = 0
         self.last_active_workspace = 0
+        self.closing = self.opening = False
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         self.screen = Wnck.Screen.get_default()
         self.popup = Notify.Notification.new("")
         self.popup.set_timeout(3000)
         self.popup.set_urgency(0)
-        self.popup.add_action("close", "", lambda: None, None)
+        # self.popup.add_action("close", "", lambda: None, None)
         Notify.init("Workspace Switch Notifier")
 
         if not os.path.exists(MAXIMIZE_BLACKLIST_PATH):
             open(MAXIMIZE_BLACKLIST_PATH, 'x').close()
+
+        if not os.path.exists(MAXIMIZE_ROLE_BLACKLIST_PATH):
+            open(MAXIMIZE_ROLE_BLACKLIST_PATH, 'x').close()
 
     @property
     def timestamp(self):
@@ -66,6 +75,11 @@ class DynamicWorkspaces:
                 *self.default_maximize_blacklist,
                 *f.read().splitlines()
             }
+
+    @property
+    def maximize_role_blacklist(self):
+        with open(MAXIMIZE_ROLE_BLACKLIST_PATH) as f:
+            return set(f.read().splitlines())
 
     # Notification handling
     def update_notification(self, in_screen, in_previously_active_workspace):
@@ -224,11 +238,13 @@ class DynamicWorkspaces:
         window_name = in_window.get_name()
         window_group_name = in_window.get_class_group_name()
         window_type = in_window.get_window_type().value_name
+        window_role = in_window.get_role()
         is_widget = window_type == "WNCK_WINDOW_DIALOG"
         maximize_blacklist = self.maximize_blacklist
 
         return (
-            is_widget
+            self.is_paused()
+            or is_widget
             or window_name in self.window_blacklist
             or window_group_name in self.window_blacklist
             or window_name in maximize_blacklist
@@ -236,15 +252,36 @@ class DynamicWorkspaces:
             or in_window.is_pinned()
             or in_window.is_minimized()
             or in_window.is_sticky()
+            or self.is_role_blacklisted(window_group_name, window_role, window_name)
         )
 
+    def is_paused(self):
+        return os.path.isfile(MAXIMIZE_PAUSE_PATH)
+
+    def is_role_blacklisted(self, group_name, role, name):
+        # should use map instead i.e [group_name] -> [name]
+        if group_name in self.role_black_listed:
+            return True
+
+        if group_name in self.maximize_role_blacklist and role in self.window_classrole_blacklist:
+            self.role_black_listed[group_name] = name
+
+        return False
+
     def handle_window_opened(self, in_screen, in_window):
+        while self.opening or self.closing:
+            time.sleep(0.1)
+            self.DEBUG and print(f"maximize-wait: {in_window.get_name()}")
+
+        self.opening = True
+
         if self.is_not_maximize_able_window(in_window):
+            self.opening = False
             return
 
         if self.DEBUG:
             print('#' * 50)
-            print(f"maximize-opened: {in_window.get_name()}; {in_window.get_class_group_name()}")
+            print(f"maximize-opened: {in_window.get_name()}; {in_window.get_role()}; {in_window.get_class_group_name()}")
 
         in_window.maximize()
         windows = [w for w in self.get_clean_windows() if w != in_window]
@@ -254,24 +291,38 @@ class DynamicWorkspaces:
         if self.is_workspace_empty(workspace, windows):
             # XXX: could cause bugs can be replaced with wmctl command to always add last empty workspace
             self.handle_dynamic_workspace(in_screen, in_window)
+            self.opening = False
             return
 
         last_workspace = in_screen.get_workspaces()[-1]
         in_window.move_to_workspace(last_workspace)
         last_workspace.activate(self.timestamp)
+        self.opening = False
 
     def handle_window_closed(self, in_screen, in_window):
-        if self.is_not_maximize_able_window(in_window):
+        while self.opening or self.closing:
+            time.sleep(0.1)
+            self.DEBUG and print(f"maximize-wait: {in_window.get_name()}")
+
+        self.closing = True
+        window_name = in_window.get_name()
+        window_group_name = in_window.get_class_group_name()
+
+        if self.role_black_listed.get(window_group_name) == window_name:
+            self.role_black_listed.pop(window_group_name)
+        elif self.is_not_maximize_able_window(in_window):
+            self.closing = False
             return
-        
+    
         if self.DEBUG:
             print('#' * 50)
-            print(f"maximize-closed: {in_window.get_name()}; {in_window.get_class_group_name()}")
+            print(f"maximize-closed: {window_name}; {in_window.get_class_group_name()}")
 
         workspaces = self.screen.get_workspaces()
         workspace = in_window.get_workspace()
 
         if workspace is None:
+            self.closing = False
             return
 
         workspace_pos = workspace.get_number()
@@ -283,6 +334,7 @@ class DynamicWorkspaces:
         )
 
         if workspace_pos == 0 and not windows:
+            self.closing = False
             return
         elif last_active_workspace and not self.is_workspace_empty(last_active_workspace, windows):
             workspace_pos = self.last_active_workspace + 1
@@ -292,10 +344,12 @@ class DynamicWorkspaces:
         if not workspace_empty:
             # XXX: could cause bugs can be replaced with wmctl command to always add last empty workspace
             self.handle_dynamic_workspace(in_screen, in_window)
+            self.closing = False
             return
 
         pre_workspace = workspaces[workspace_pos - 1]
         pre_workspace.activate(self.timestamp)
+        self.closing = False
 
     # Assigns functions to Wnck.Screen signals. Check out the API docs at
     # "http://lazka.github.io/pgi-docs/index.html#Wnck-3.0/classes/Screen.html"
